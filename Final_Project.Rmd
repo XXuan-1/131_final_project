@@ -1,0 +1,388 @@
+---
+title: "Final Project"
+author: "Jiaxuan Sun"
+date: "2022-11-29"
+output: 
+  html_document:
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+## Introduction
+
+The purpose of this project is to generate a model that will predict the rent for different Houses/Apartments/Flats.
+
+### Context
+
+In India, housing options range from the former Maharajahs' palaces to contemporary apartment buildings in major cities to modest huts in remote areas. The housing market in India has expanded significantly as wages have increased. According to the Human Rights Measurement Initiative, India is meeting 60.9% of the right to housing at its current income level.
+
+An agreement where a fee is paid for the temporary use of a good, service, or property owned by another is known as renting, sometimes known as hiring or letting. In a gross lease, the tenant makes a single monthly payment while the landlord covers all normal maintenance costs. The sharing economy can be applied to renting.
+
+Let's look at an example of India apartments.
+```{r, echo=FALSE}
+library(vembedr)
+embed_url("https://www.youtube.com/watch?v=at5wFFGN1c8") %>%
+  use_align("center") %>%
+  use_rounded()
+```
+
+### Usefulness of this model
+
+Using this model, we could better price for different states of houses/apartments/flats, which would improve the working efficiency of agents and lead to faster deal between owners and tenants.
+
+## Loading Data and Packages
+
+In this Data set, we have information on almost 4700+ Houses/Apartments/Flats Available for Rent with different parameters like BHK, Rent, Size, No. of Floors, Area Type, Area Locality, City, Furnishing Status, Type of Tenant Preferred, No. of Bathrooms, Point of Contact.
+
+- **BHK**: Number of Bedrooms, Hall, Kitchen.
+- **Rent**: Rent of the Houses/Apartments/Flats.
+- **Size**: Size of the Houses/Apartments/Flats in Square Feet.
+- **Floor**: Houses/Apartments/Flats situated in which Floor and Total Number of Floors (Example: Ground out of 2, 3 out of 5, etc.)
+- **Area Type**: Size of the Houses/Apartments/Flats calculated on either Super Area or Carpet Area or Build Area.
+- **Area Locality**: Locality of the Houses/Apartments/Flats.
+- **City**: City where the Houses/Apartments/Flats are Located.
+- **Furnishing Status**: Furnishing Status of the Houses/Apartments/Flats, either it is Furnished or Semi-Furnished or Unfurnished.
+- **Tenant Preferred**: Type of Tenant Preferred by the Owner or Agent.
+- **Bathroom**: Number of Bathrooms.
+- **Point of Contact**: Whom should you contact for more information regarding the Houses/Apartments/Flats.
+As we can see, the *Rent* variable is our outcome, and the other 10 variables are our predictors.
+
+```{r setup, message=FALSE, warning= FALSE}
+#load packages
+library(tidymodels)
+library(tidyverse)
+library(corrplot)
+library(rpart.plot)
+library(janitor)
+library(randomForest)
+library(xgboost)
+library(ranger)
+library(discrim)
+library(poissonreg)
+library(corrr)
+library(ggcorrplot)
+library(kknn)
+library(vip)
+tidymodels_prefer()
+
+#load data
+rent_data = read.csv("House_Rent_Dataset.csv")
+```
+
+## Exploratary Data Analysis
+
+```{r}
+summary(rent_data)
+```
+
+Because data were collected in 2022, I assume that the minor differences in dates of posting would not affect the pricing so that I want to delete column 'Posted.On' in my data set. Also, with size already listed, the information about *Houses/Apartments/Flats situated in which Floor and Total Number of Floors* is not necessary as well. Similarly, with 'Area.Type' listed, *Locality of the Houses/Apartments/Flats* is not important. And output above shows that 'Area.Type', 'City', 'Furnishing.Status', 'Tenant.Preferred', and 'Point.of.Contact' are characters, so I will change them into nominal variables. Besides, although the number of *Bedrooms, Hall, Kitchen* and the number of *Bathroom* are technically discrete values, I consider them as continuous variables to avoid potential problems such as there will be 10 categories of 'Bathroom'.
+
+```{r}
+rent_data <- rent_data %>% select(-Posted.On, -Floor, -Area.Locality)
+rent_data$Area.Type <- as.factor(rent_data$Area.Type)
+rent_data$City <- as.factor(rent_data$City)
+rent_data$Furnishing.Status <- as.factor(rent_data$Furnishing.Status)
+rent_data$Tenant.Preferred <- as.factor(rent_data$Tenant.Preferred)
+rent_data$Point.of.Contact <- as.factor(rent_data$Point.of.Contact)
+```
+
+### Clean Names
+
+```{r}
+rent_data <- rent_data %>% clean_names()
+```
+
+Now we could see a tidy data set including our necessary predictors and outcome.
+
+```{r}
+summary(rent_data)
+```
+
+Since there is only one observation with value 'Contact Builder' in 'point_of_contact' column, so I would delete it.
+
+```{r}
+rent_data <- rent_data %>%
+  filter(point_of_contact != 'Contact Builder')
+
+rent_data$point_of_contact <- droplevels(rent_data$point_of_contact)
+```
+
+```{r}
+summary(rent_data)
+```
+
+
+```{r}
+model.matrix(~0+., data = rent_data) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(show.diag = F, type="upper")
+```
+
+### Analyzing the rent
+```{r}
+ggplot(rent_data, aes(rent)) + 
+  geom_boxplot()
+```
+
+We could tell there are many outliers in Rent shown as horizontal dots, which affect us to build a valid predictive model, so I would like to drop few of them so that the distribution of Rent is not that skewed.
+
+```{r}
+rent_data %>%
+  arrange(desc(rent)) %>%
+  head(10)
+```
+```{r}
+df <- rent_data %>%
+  filter(rent <= 600000)
+```
+
+Let's see the distribution of Rent without extreme outliers.
+
+```{r}
+hist(df$rent, xlab = "Rent", main = "Distribution of Rent")
+summary(df$rent)
+```
+Although it does not look good as well, we could not directly remove too many rows since they may be useful for prediction.
+
+### Analyzing the BHK
+```{r}
+ggplot(df, aes(x = rent, y = bhk)) + geom_point()
+```
+
+There is no obvious relationship between *bhk* and *rent*, because as *bhk* increases, *rent* nearly remains the same. A rough explanation of this trend could be that tenants' requirements of the number of bedrooms, halls, and kitchens are different but this variables combines them.
+
+### Analyzing the Size
+```{r}
+ggplot(df, aes(x = rent, y = size)) + geom_point()
+```
+
+We are able to see a positive relationship between these two variables and this makes sense.
+
+### Analyzing the Bathroom
+```{r}
+ggplot(df, aes(x = rent, y = bathroom)) + geom_point()
+```
+
+We could also see a roughly positive relationship between *bathroom* and *rent*.
+
+### Analyzing the categorical variables
+```{r}
+ggplot(df, aes(x = city, y = rent, fill = area_type)) + 
+  geom_bar(stat = 'identity', position = position_dodge()) +
+  scale_fill_brewer(palette = "Paired") 
+ggplot(df, aes(x = furnishing_status, y = rent, fill = tenant_preferred)) + 
+  geom_bar(stat = 'identity', position = position_dodge()) +
+  scale_fill_brewer(palette = "Paired")
+ggplot(df, aes(x = point_of_contact, y = rent)) + geom_bar(stat = 'identity')
+```
+
+From the plots, carpet areas are priced the highest rent, especially in Mumbai because Mumbai is a large city, while the rents of super area are close in each city, built areas are the cheapest in every city; housings in furnished status are the most expensive which makes sense because they costs more, and Bachelors usually have to pay more rent as compared to others. Housings administered by the agent are priced higher because rent contains agency fee.
+
+## Data Splitting and Cross-Validation
+
+```{r}
+set.seed(95)
+rent_split <- initial_split(df, prop = 0.70, strata = rent)
+rent_train <- training(rent_split)
+rent_test <- testing(rent_split)
+```
+
+There are total 4745 observations in the data set, 70% of the data set consists the training set with 3315 observations and 30% of the data set consists the testing set with 1423 observations.
+
+```{r}
+rent_folds <- vfold_cv(rent_train, v = 10, strata = rent)
+```
+
+We are dividing the training set into 10 groups and using the first for validation and the remaining 9 groups for training. K-fold cross_validation randomly divide the data into k groups of equal sizes, holding out the first fold as the validation set, and the model is fit on the remaining k-1 folds to be training set. 
+
+## Create a Recipe
+
+```{r}
+rent_recipe <- recipe(rent ~ bhk + size + area_type + city + furnishing_status +
+                        tenant_preferred + bathroom + point_of_contact, rent_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  step_poly()
+```
+
+We build this model with rent be our response variables and other 8 variables be our predictors. We convert nominal data into one or more numeric binary model terms for the levels of the original data, enabling the model to predict based on these variables; and we normalize numeric data to have a standard deviation of one and a mean of zero.
+
+## Model Fitting
+
+### Linear Regression
+
+```{r,eval=FALSE}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wkflow <- workflow() %>%
+  add_recipe(rent_recipe) %>%
+  add_model(lm_model)
+
+#fit the linear model to the training set:
+lm_fit <- fit_resamples(lm_wkflow, resamples =  rent_folds, metrics = metric_set(rmse, rsq))
+
+#In order to save time for knitting, we save each fitting result and load them in the next chunk.
+write_rds(lm_fit, file = "lm_fit.rds")
+```
+
+```{r}
+lm_fit <- read_rds("lm_fit.rds")
+
+lm_fit %>% collect_metrics()
+```
+
+The RMSE in linear regression model is extremely high and the RSQ is 0.59, means that the model is poor, so we are going to try another model later. 
+
+```{r}
+lm <- collect_metrics(lm_fit) %>% 
+  arrange(desc(mean)) %>%
+  filter(.metric == "rsq") %>%
+  mutate(methods = "linear regression") %>%
+  head(1)
+#collect the main metric for later comparison
+```
+
+### Random Forest
+
+```{r}
+rf_model <- rand_forest(min_n = tune(), mtry = tune(), trees = tune(), 
+                        mode = "regression") %>% 
+  set_engine("ranger", importance = "impurity")
+
+rf_workflow <- workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(rent_recipe)
+
+param_grid1 <- grid_regular(mtry(range = c(1,8)), min_n(range = c(5, 20)), 
+                            trees(range = c(200,1000)), levels = 8)
+#The last thing we need is the values of min_n, mtry, trees we are trying. This can be created using grid_regular(), which creates a grid of evenly spaced parameter values.
+```
+
+In this model, we tuned three parameters: 'mtry' represents that the number of variables randomly sampled as candidates at each split; 'trees' represents the number of decision trees to fit; 'min_n' represents the minimum number of data points in a node, which must be satisfied to further split the mode.
+
+```{r, eval=FALSE}
+tune_forest <- tune_grid(rf_workflow, resamples = rent_folds, grid = param_grid1)
+
+write_rds(tune_forest, file = "rf_fit.rds")
+```
+
+We can view the model results:
+
+```{r}
+rand_forest <- read_rds("rf_fit.rds")
+autoplot(rand_forest, metric = "rsq")
+```
+
+In this plot, models with different number of trees perform nearly the same. But we could tell that model with 20 minimal node size and 6-8 predictors perform the best, reaching highest RSQ.
+
+```{r}
+rf <- collect_metrics(rand_forest) %>% 
+  arrange(desc(mean)) %>%
+  filter(.metric == "rsq") %>%
+  mutate(methods = "ranfom forest") %>% slice(1)
+#collect the main matrics for later comparison
+```
+
+### Boosted Trees
+
+```{r}
+boost <- boost_tree(trees = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+bt_wkflow <- workflow() %>%
+  add_model(boost) %>%
+  add_recipe(rent_recipe)
+
+param_grid2 <- grid_regular(trees(range = c(10, 2000)), levels = 10)
+```
+
+```{r, eval=FALSE}
+tune_boost <- tune_grid(bt_wkflow, resamples = rent_folds, grid = param_grid2)
+
+write_rds(tune_boost, file = "bt_fit.rds")
+```
+
+```{r}
+boosted <- read_rds("bt_fit.rds")
+autoplot(boosted)
+```
+
+The model performance decreases as the number of trees increases, showing higher RMSE and lower RSQ. 
+
+```{r}
+bt <- collect_metrics(boosted) %>% 
+  arrange(desc(mean)) %>%
+  filter(.metric == "rsq") %>% 
+  mutate(methods = "boosted tree") %>%
+  head(1)
+#collect the main matrics for later comparison
+```
+
+### K Nearest Neighbors
+```{r}
+knn_model <- nearest_neighbor(neighbors = tune(), mode = "regression") %>% 
+  set_engine("kknn")
+
+knn_workflow <- workflow() %>% 
+  add_model(knn_model) %>% 
+  add_recipe(rent_recipe)
+
+param_grid3 <- grid_regular(neighbors(range = c(2,10)), levels = 8)
+```
+
+```{r, eval=FALSE}
+tune_knn <- tune_grid(knn_workflow, resamples = rent_folds, param_grid3)
+
+write_rds(tune_knn, file = "knn_fit.rds")
+```
+
+```{r}
+knn_fit <- read_rds("knn_fit.rds")
+autoplot(knn_fit, metric = "rsq")
+```
+
+The model performance increases when the number of nearest neighbors increases. 
+
+```{r}
+knn <- collect_metrics(knn_fit) %>% 
+  arrange(desc(mean)) %>%
+  filter(.metric == "rsq") %>%
+  mutate(methods = "KNN") %>%
+  head(1)
+knn
+```
+
+## Assessing Model Performance
+
+```{r}
+models <- bind_rows(lm, rf, bt, knn) %>%
+  select(methods, .metric, mean)
+models
+```
+
+After comparing, the random forest model has the highest RSQ = 0.7718723, which means it performs the best. So we could fit it to the testing set:
+
+```{r}
+best_model <- select_best(rand_forest, metric = "rmse")
+#to find the best 
+final_wkflow <- finalize_workflow(rf_workflow, best_model)
+#Now, this best model should be fit again, this time using the training data set.
+finalfit <- fit(final_wkflow, rent_train)
+rent_final <- predict(finalfit, rent_test)
+
+df_metric <- metric_set(rsq)
+rent_final %>% 
+  df_metric(truth = rent_test$rent, estimate = .pred)
+```
+The model performs well with RSQ value of 0.7386576, which is relatively high. The RSQ on training set is 0.7718723, they differ and the RSQ of testing is lower because we fit the model with training data set. And although stratifying the data, the distribution of training and testing data set might be slightly different.
+
+## Conclusion
+
+In this project, I applied four models- linear regression, random forest, boosted tree, K nearest neighbors- to realize a regression problem about predicting rent based on different predictors including the number of bedrooms, hall, and kitchen, size in square feet, location, furnishing status, types of preferred tenants, number of bedrooms and point of contact; the random forest model performs the best and based on my results, we are supposed to use random forest model to predict or help to price corresponding rent according to different status of houses/apartments/flats. While the linear regression model performs poorly, the possible reason is that there are some correlation between predictors so that this is not a linear model.
+
+I think that this is not a perfect predicting model because I used a large-scaled data of outcome variable, and the data is in extremely skewed distribution. Because of this kind of distribution, RMSE value in each value are significantly high, reaching to 30,000 and more. It is better to use a transformation algorithm to transform the responses to normal distribution, then fit new models and predict on it, which would make the RMSE lower and seems rational.
+
+The above analysis is necessary for pricing new housing sources and it is important nowadays since people's needs for leasing is increasing as time goes by. By refining this model, more business value might be generated.
